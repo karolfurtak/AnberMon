@@ -2,9 +2,42 @@
 
 ![CI](https://github.com/karolfurtak/AnberMon/actions/workflows/ci.yml/badge.svg)
 
-Lekki **monitor systemu** dla **Anbernic RG40XX V** — pokazuje na żywo CPU, RAM, swap, temperaturę CPU, baterię, uptime + **wykres czasowy** (CPU/RAM/Temp z 4-minutowej historii). Sterowany D-padem, z możliwością wygaszenia ekranu przyciskiem POWER bez wyłączenia aplikacji.
+**Dashboard "co się dzieje na mojej konsoli" — żywy podgląd systemu + agenta AI na ekranie Anbernic RG40XX V.**
 
 ![AnberMon screenshot](screenshot.png)
+
+## Po co to jest
+
+Jeśli zbudowałeś (lub planujesz zbudować) **agenta AI na konsoli Anbernic** — np. własnego bota Discord który odbiera zadania na konsoli i odpala Claude Code do ich wykonania — masz problem: konsola jest mała, działa headless po SSH, nie wiesz w danej chwili:
+
+- Czy bot żyje i jest połączony z Discordem?
+- Co teraz robi Claude Code? Ile zadań w kolejce?
+- Czy CPU/temperatura są w normie?
+- Jaka jest ostatnia aktywność na Discord?
+- Ile baterii zostało zanim trzeba podpiąć ładowarkę?
+
+**AnberMon** to fullscreen SDL2 panel który pokazuje wszystko to równocześnie — uruchamiasz z App Center konsoli i widzisz **na ekranie konsoli, w czasie rzeczywistym**:
+
+- **Lewa kolumna SYSTEM** — CPU%, RAM%, Swap%, temperatura, MB used, bateria z paskiem progresu i wskaźnikiem ładowania
+- **Prawa kolumna BOT** — status bota Discord (online/offline scan po procesie), kolejka zadań, liczba plików w katalogu sprawozdań, uptime systemu
+- **Wykres czasowy** — 3 linie (CPU zielona, RAM niebieska, Temp °C czerwona) na wspólnym wykresie 0-100%, 4 minuty historii
+- **Wiadomości Discord** — ostatnie 12 wiadomości z Twoich kanałów (autorzy, kanały, treść)
+- **Ostatnie pliki** — 3 ostatnio zapisane pliki sprawozdań przez agenta
+
+Wszystko sterowane gamepadem konsoli (D-pad, MENU = wyjście, POWER = wygaszenie ekranu z zachowaniem aplikacji).
+
+> AnberMon **nie zastępuje** Twojego bota — jest tylko pasywnym monitorem. Czyta plik aktywności który Twój bot zapisuje. Sam w sobie nic nie wysyła do Discorda ani nie odpala Claude Code. Architektura niżej.
+
+## Use case — przykładowy workflow
+
+1. **Studiujesz w terenie** — zabrałeś Anbernica na laboratorium (640×480 ekran w kieszeni)
+2. **Robisz zdjęcia / pomiary** telefonem, wrzucasz na swój prywatny serwer Discord do kanału `lab-mechanika`
+3. **Twój bot na konsoli** odbiera, zapisuje do `/mnt/data/sprawozdania/projekty/lab-mechanika/raw/`
+4. **Pytasz na Discordzie:** "napisz sprawozdanie z tego" — bot odpala Claude Code który czyta zdjęcia (Read tool widzi obrazy), arkusze (xlrd/openpyxl), pisze sprawozdanie do `processed/Sprawozdanie_*.md`
+5. **Patrzysz na ekran konsoli** — AnberMon pokazuje że bot jest busy, kolejka 1, ostatnia wiadomość, temperatura 48°C, bateria 65%
+6. **Po skończeniu** — w sekcji OSTATNIE PLIKI widzisz nazwę nowego sprawozdania, możesz pobrać `.md` przez SSH
+
+To jest scenariusz dla którego AnberMon powstał. Bez niego musiałbyś `tail -F` po SSH z laptopa.
 
 Opcjonalnie integruje się z [AnbernBot](https://github.com/karolfurtak/AnbernBot) — wyświetla stan bota Discord (online/offline, kolejka, aktywne zadania, ostatnie wiadomości i pliki).
 
@@ -167,6 +200,138 @@ AnberMon czyta `/mnt/data/anberbot_activity.json` jako JSON o strukturze:
 Twój bot Discord aktualizuje ten plik przy każdej zmianie stanu. Zapis powinien być **atomowy** (`tmp + rename`) żeby AnberMon nie odczytał uszkodzonego JSON podczas write'a.
 
 Plik powinien też wskazywać że bot żyje — AnberMon dodatkowo skanuje `psutil.process_iter()` w poszukiwaniu procesu o ścieżce zawierającej `anberbot` i na tej podstawie ustawia wskaźnik **online/offline**. Dostosuj nazwę procesu lub edytuj `bot_online()` w `app/main.py` jeśli używasz innej nazwy.
+
+## Struktura plików projektu
+
+AnberMon zakłada że Twój bot organizuje pliki **per-kanał Discord**. Każdy kanał lub wątek = osobny katalog projektu pod `/mnt/data/sprawozdania/projekty/`. Standardowy układ:
+
+```
+/mnt/data/sprawozdania/
+├── projekty/
+│   ├── <nazwa-kanału-1>/         # np. lab-mechanika
+│   │   ├── raw/                   # pliki surowe od użytkownika
+│   │   │   ├── IMG_20260420_142013.jpg
+│   │   │   ├── pomiary.xlsx
+│   │   │   ├── notatka.pdf
+│   │   │   └── *.meta.json        # metadane dołączone przez bota
+│   │   ├── processed/             # gotowe sprawozdania Claude Code
+│   │   │   └── Sprawozdanie_2026-05-10_1830.md
+│   │   ├── exports/               # eksporty (PDF, ZIP itp.)
+│   │   └── projekt.json           # opcjonalna metadana projektu
+│   ├── <nazwa-kanału-2>/
+│   │   └── ...
+│   └── ...
+└── incoming/                      # fallback gdy bot nie zna kontekstu kanału
+```
+
+**Dlaczego per-kanał:**
+- Każdy temat / laboratorium / projekt → osobny kanał Discord → osobny katalog
+- Claude Code przy generowaniu sprawozdania ma `cwd` na ten katalog i widzi tylko pliki tego projektu (czysty kontekst)
+- Łatwo zarchiwizować/usunąć cały projekt jednym `rm -r`
+- Wątki Discord (threads) → osobne podprojekty po nazwie wątku (jeśli bot je obsługuje)
+
+**Kontrakt na nazwy:**
+- `raw/` — bot zapisuje tu pliki przesłane przez Discord. Jeśli plik o tej samej nazwie już istnieje, bot powinien dorzucić timestamp (np. `_20260510_184502`) zamiast nadpisać.
+- `processed/` — Claude Code zapisuje tu wynik. Konwencja nazwy: `Sprawozdanie_RRRR-MM-DD_HHMM.md`.
+- `*.meta.json` obok plików raw — dla kontekstu (oryginalna nazwa, autor wiadomości, opis).
+- Wszystko UTF-8.
+
+AnberMon w sekcji **OSTATNIE PLIKI** pokazuje 3 najnowsze wpisy z listy `files` w `anberbot_activity.json`. Format:
+```json
+"files": [
+  { "time": "20:31:51", "name": "raport.pdf", "project": "lab-3", "size": 102400 }
+]
+```
+
+## Praca przez SSH — workflow developerski
+
+Większość pracy z botem/AnberMonem (debug, hot-redeploy, inspekcja stanu) robi się ze zdalnego laptopa przez SSH. Poniżej skrót przydatnych operacji:
+
+### Setup SSH key (jednorazowo)
+
+```bash
+# Z laptopa
+ssh-keygen -t ed25519 -C "anbernic" -f ~/.ssh/anbernic_key
+ssh-copy-id -i ~/.ssh/anbernic_key.pub root@<IP-konsoli>
+
+# ~/.ssh/config wpis (opcjonalnie ułatwia)
+Host anbernic
+  HostName <IP-konsoli>
+  User root
+  IdentityFile ~/.ssh/anbernic_key
+  ServerAliveInterval 30
+```
+
+> Stock firmware ma `StrictModes` w sshd_config — upewnij się że `~/.ssh/authorized_keys` na konsoli ma `chmod 600` i właściciela `root:root`. WiFi powersave zalecone OFF (rozłącza krótkie sesje SSH) — patrz [hardware tricks](#hardware-tricks-użyte-w-aplikacji).
+
+### Live monitoring logów
+
+```bash
+# Stream logów bota (Ctrl+C żeby przerwać)
+ssh anbernic "tail -F /mnt/data/anberbot.log"
+
+# Logi AnberMon i debug evdev
+ssh anbernic "tail -F /mnt/data/anbermon.log /mnt/data/anbermon_debug.log"
+
+# Stan pliku aktywności w czasie rzeczywistym
+ssh anbernic "watch -n2 'jq -r \"\\\"queue=\\(.queue) busy=\\(.busy)\\\"\" /mnt/data/anberbot_activity.json'"
+```
+
+### Hot redeploy AnberMon
+
+```bash
+# Lokalnie zmieniasz app/main.py, potem:
+scp app/main.py anbernic:/mnt/mmc/Roms/APPS/anbermon/main.py
+ssh anbernic "pkill -f /mnt/mmc/Roms/APPS/anbermon/main.py"
+# Uruchom AnberMon ponownie z App Center na konsoli
+```
+
+> **Nie** zabijaj AnberMona przez `kill -9` jeśli aktualnie jest w trybie ekran-off (POWER button) — quit() w main.py odpowiada za przywrócenie `fb0/blank=0`. Najlepiej naciśnij MENU na konsoli, potem `pkill` z SSH.
+
+### Restart bota Discord (jeśli używasz systemd)
+
+```bash
+ssh anbernic "systemctl restart anberbot && sleep 50 && tail -20 /mnt/data/anberbot.log"
+```
+
+### Test Claude Code z konsoli
+
+```bash
+ssh anbernic
+# Na konsoli (w SSH):
+cd /tmp                                          # neutralne cwd, brak ładowania skilli
+IS_SANDBOX=1 claude -p "powiedz dwa słowa"       # OAuth Max/Pro
+# albo z dangerously-skip-permissions:
+cd /mnt/data/sprawozdania/projekty/<kanał>
+IS_SANDBOX=1 claude -p "wylistuj raw/" --dangerously-skip-permissions
+```
+
+> Pod rootem `--dangerously-skip-permissions` jest blokowany **chyba że** ustawiona jest zmienna `IS_SANDBOX=1`. Stock firmware na Anbernicu loguje się jako root — ten env var to jedyny sposób.
+
+### Inspekcja systemu
+
+```bash
+ssh anbernic "echo CPU:; cat /proc/loadavg; echo TEMP:; awk '{print \$1/1000}' /sys/class/thermal/thermal_zone0/temp; echo BAT:; cat /sys/class/power_supply/axp2202-battery/capacity; echo WIFI:; iw dev wlan0 link | grep -E 'SSID|signal'"
+```
+
+### Pełen reset stanu projektu (przykład)
+
+```bash
+# Skasuj wszystkie sprawozdania danego kanału
+ssh anbernic "rm -rf /mnt/data/sprawozdania/projekty/<nazwa-kanału>"
+
+# Kompletny reset bota
+ssh anbernic "systemctl stop anberbot; rm /mnt/data/anberbot_activity.json /mnt/data/anberbot.log; systemctl start anberbot"
+```
+
+### Przydatne aliasy w `~/.bashrc` na laptopie
+
+```bash
+alias amon='ssh anbernic "tail -F /mnt/data/anbermon.log"'
+alias abot='ssh anbernic "tail -F /mnt/data/anberbot.log"'
+alias atemp='ssh anbernic "awk \"{print \\\$1/1000}\" /sys/class/thermal/thermal_zone0/temp"'
+alias adeploy-mon='scp app/main.py anbernic:/mnt/mmc/Roms/APPS/anbermon/main.py'
+```
 
 ## Synchronizacja Discord + Claude Code na Anbernicu
 
