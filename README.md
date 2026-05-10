@@ -485,5 +485,5 @@ MIT — patrz [LICENSE](LICENSE).
 
 ## Powiązane
 
-- [Anbernet](https://github.com/karolfurtak/Anbernet) — manager WiFi
+- [AnberNet](https://github.com/karolfurtak/AnberNet) — manager WiFi
 - [AnberCC](https://github.com/karolfurtak/AnberCC) — Claude Code SDL2 terminal
