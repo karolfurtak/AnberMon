@@ -95,66 +95,209 @@ Skrypt:
 
 Po instalacji **AnberMon** pojawi się w App Center na konsoli.
 
-## Integracja z AnbernBot (opcjonalna)
+## Architektura — co AnberMon faktycznie pokazuje
 
-Jeśli zainstalujesz AnbernBot, AnberMon automatycznie wykryje:
-- Plik aktywności `/mnt/data/anberbot_activity.json` — pokaże status bota, kolejkę, ostatnie wiadomości
-- Proces `anberbot.py` — wskaźnik **online/offline** w sekcji BOT
+AnberMon jest **monitorem pipeline'u agenta**. Sam w sobie nie rozmawia z Discordem ani Claude Code — pokazuje **stan i przepływ danych** między tymi usługami które żyją na konsoli równolegle.
 
-Bez AnbernBota AnberMon działa standalone — sekcja BOT pokazuje "offline" i puste listy.
+```
+   ┌──────────────────┐         ┌────────────────────┐         ┌─────────────────┐
+   │  Twój Discord    │ ◄────► │  Twój prywatny      │ ◄────► │  Claude Code    │
+   │  serwer/kanały   │  text  │  bot Discord        │   PTY   │  (claude -p,    │
+   │  + uploady       │  files │  (np. AnbernBot.py) │  stdin  │  Read/Bash/...) │
+   └──────────────────┘         └─────────┬──────────┘         └─────────────────┘
+                                          │
+                                          ▼ pisze stan
+                                ┌────────────────────┐
+                                │ /mnt/data/         │
+                                │ anberbot_activity  │
+                                │ .json (atomic)     │
+                                └─────────┬──────────┘
+                                          │ czyta co 2s
+                                          ▼
+                                ┌────────────────────┐
+                                │     AnberMon       │
+                                │     (ten projekt)  │
+                                └────────────────────┘
+```
 
-> **Prywatność:** plik `/mnt/data/anberbot_activity.json` zawiera nazwy Twoich kanałów Discord i fragmenty wiadomości. **Nie commituj go nigdzie.** AnberMon tylko go czyta — niczego nie wysyła z urządzenia.
+**Przepływ danych:**
 
-## Synchronizacja Discord + Claude Code
+1. Wysyłasz wiadomość lub plik na Discord (np. zdjęcie z laboratorium)
+2. Twój bot Discord (działający na Anbernicu) odbiera ją przez Discord API
+3. Bot zapisuje plik na `/mnt/data/sprawozdania/projekty/<kanał>/raw/`
+4. Bot odpala `claude -p` w katalogu projektu — Claude Code czyta pliki, generuje sprawozdanie, zapisuje do `processed/`
+5. Bot wraca z odpowiedzią na Discord
+6. **W tym całym czasie** bot zapisuje co robi do `anberbot_activity.json` (kolejka, busy, ostatnie wiadomości i pliki)
+7. AnberMon co 2 sekundy odczytuje ten plik i renderuje aktualny stan
 
-Jeśli budujesz pełen stack (AnberMon + bot Discord z Claude Code), oto jak skonfigurować obie usługi na konsoli:
+**Bot Discord nie jest częścią tego repo** — jest Twój prywatny, dostosowany do Twojego workflow. AnberMon dostarcza tylko *kontrakt na plik aktywności* (patrz [Format pliku aktywności](#format-pliku-anberbotactivityjson) niżej) — jeśli Twój bot będzie do niego zapisywał w tym formacie, AnberMon pokaże dane.
 
-### Discord — token bota
+> **Prywatność:** plik `anberbot_activity.json` zawiera nazwy Twoich kanałów Discord i fragmenty wiadomości. **Nigdy go nie commituj.** AnberMon tylko go czyta z dysku — niczego nie wysyła z urządzenia.
 
-1. Wejdź na **https://discord.com/developers/applications** (konto Discord wymagane)
-2. **New Application** → nadaj nazwę (np. "AnbernBot")
-3. Sekcja **Bot** → **Reset Token** → skopiuj token (pokazuje się raz, zapisz!)
-4. **Privileged Gateway Intents** → włącz **Message Content Intent** (bot musi czytać treść wiadomości)
-5. Sekcja **OAuth2 → URL Generator**: zaznacz `bot` + `applications.commands`, w Bot Permissions zaznacz `Send Messages`, `Read Message History`, `Add Reactions`, `Attach Files`. Skopiuj URL na dole.
-6. **Otwórz URL w przeglądarce** → wybierz serwer → Authorize. Bot dołączy do serwera.
+## Format pliku `anberbot_activity.json`
 
-Na konsoli (przez SSH) zapisz token do pliku env (root-only):
+AnberMon czyta `/mnt/data/anberbot_activity.json` jako JSON o strukturze:
+
+```jsonc
+{
+  "queue": 0,                  // liczba zadań w kolejce
+  "busy": false,               // czy bot aktualnie przetwarza
+  "messages": [                // ostatnie wiadomości (do 50 trzymanych przez bota, AnberMon pokazuje 12)
+    {
+      "time": "20:32:08",      // HH:MM:SS
+      "channel": "test",       // nazwa kanału
+      "thread": null,          // lub nazwa wątku
+      "author": "ktoś",        // autor
+      "content": "treść...",   // pierwsze 80 znaków
+      "att": 0,                // liczba attachments
+      "bot": false             // true = wiadomość bota, false = usera
+    }
+  ],
+  "files": [                   // ostatnio zapisane pliki (do 20, AnberMon pokazuje 3)
+    {
+      "time": "20:31:51",
+      "name": "raport.pdf",
+      "project": "lab-3",      // nazwa projektu/kanału
+      "size": 102400           // bajty
+    }
+  ]
+}
+```
+
+Twój bot Discord aktualizuje ten plik przy każdej zmianie stanu. Zapis powinien być **atomowy** (`tmp + rename`) żeby AnberMon nie odczytał uszkodzonego JSON podczas write'a.
+
+Plik powinien też wskazywać że bot żyje — AnberMon dodatkowo skanuje `psutil.process_iter()` w poszukiwaniu procesu o ścieżce zawierającej `anberbot` i na tej podstawie ustawia wskaźnik **online/offline**. Dostosuj nazwę procesu lub edytuj `bot_online()` w `app/main.py` jeśli używasz innej nazwy.
+
+## Synchronizacja Discord + Claude Code na Anbernicu
+
+Jeśli budujesz własnego bota Discord który będzie współpracował z AnberMonem, oto jak skonfigurować obie usługi na konsoli **od zera**:
+
+### Część 1 — Discord
+
+#### Krok 1.1: Konto Discord
+Załóż konto na **https://discord.com** jeśli nie masz. Konto darmowe wystarcza.
+
+#### Krok 1.2: Utwórz serwer (lub użyj istniejącego)
+- Otwórz aplikację/web Discord
+- Lewa kolumna → przycisk **+** (Add a Server)
+- **Create My Own** → **For me and my friends**
+- Nadaj nazwę (np. "Mój bot Anbernic")
+- Po utworzeniu masz serwer z domyślnym kanałem `#general`. Możesz tworzyć więcej kanałów `+` przy "TEXT CHANNELS".
+
+> Ten serwer to "guild" w API Discorda. Bot będzie do niego dodany w Kroku 1.5.
+
+#### Krok 1.3: Utwórz aplikację bota (developer portal)
+- Wejdź na **https://discord.com/developers/applications**
+- Zaloguj się (tym samym kontem co serwer)
+- **New Application** (prawy górny róg) → nadaj nazwę aplikacji (np. "MójBotAnbernic") → **Create**
+
+#### Krok 1.4: Konfiguracja bota
+- W lewym menu nowej aplikacji wybierz **Bot**
+- Sekcja **Privileged Gateway Intents**:
+  - **Message Content Intent** → **WŁĄCZ** (bot musi czytać treść wiadomości)
+  - Server Members + Presence — opcjonalne, dla prostego bota niepotrzebne
+- Sekcja **Token**:
+  - **Reset Token** → zatwierdź → **skopiuj token natychmiast** (pokazany raz, jak zgubisz musisz znowu reset)
+  - To długi ciąg `MzM5...` — zachowaj go jak hasło, NIE wklejaj nigdzie publicznie
+
+#### Krok 1.5: Zaproś bota na swój serwer
+- W lewym menu wybierz **OAuth2** → **URL Generator**
+- **Scopes**: zaznacz `bot` (i `applications.commands` jeśli chcesz slash commands)
+- **Bot Permissions**: zaznacz minimalnie:
+  - `Read Messages/View Channels`
+  - `Send Messages`
+  - `Read Message History`
+  - `Add Reactions`
+  - `Attach Files`
+  - `Embed Links`
+- Na dole skopiuj **Generated URL**
+- Wklej URL do przeglądarki → wybierz swój serwer → **Authorize** → przejdź captcha
+- Bot powinien dołączyć do serwera (zobaczysz go offline w prawej kolumnie)
+
+#### Krok 1.6: Zapisz token na konsoli (Anbernic)
+Połącz się z konsolą po SSH i zapisz token jako env var (root-only):
 ```bash
 sudo tee /etc/anberbot.env >/dev/null <<EOF
-DISCORD_TOKEN=tu_wklej_token_z_kroku_3
+DISCORD_TOKEN=tu_wklej_swoj_token_z_kroku_1.4
 EOF
 sudo chmod 600 /etc/anberbot.env
 ```
 
-> Plik `/etc/anberbot.env` jest **przez systemd** ładowany do bota (`EnvironmentFile=`). NIE commituj go nigdzie. `.gitignore` powinien blokować `*.env`.
+**Nigdy nie commituj** `/etc/anberbot.env`. `.gitignore` powinien blokować `*.env`.
 
-### Claude Code — login
+Twój bot będzie używał `os.environ['DISCORD_TOKEN']` do zalogowania (typowy wzorzec dla discord.py). systemd unit dla bota powinien mieć `EnvironmentFile=/etc/anberbot.env`.
 
-Wymagana subskrypcja Anthropic (Claude Max/Pro) lub klucz API.
+### Część 2 — Claude Code
 
+Wymagana subskrypcja Anthropic — testowane z **Claude Max** (działa też z **Claude Pro** lub kluczem API).
+
+#### Krok 2.1: Konto Anthropic + subskrypcja
+- Załóż konto na **https://claude.ai** (jeśli nie masz)
+- W ustawieniach konta: **Settings → Plans** → wybierz Pro/Max (lub utwórz API key w **API Console**)
+
+#### Krok 2.2: Zainstaluj Node.js + Claude Code na konsoli
 ```bash
-# 1. Node.js + Claude Code (jeśli brak)
-apt install -y nodejs npm
+# Przez SSH na Anbernic
+apt update && apt install -y nodejs npm
+
+# Globalna instalacja Claude Code
 npm install -g @anthropic-ai/claude-code
 
-# 2. Login przez SSH (otwiera URL — wklej do przeglądarki, skopiuj kod, wklej w SSH)
-ssh root@<IP-konsoli>
-claude /login
-# Wybierz "Claude Max account" → otwórz URL na laptopie → zaloguj → skopiuj kod → wklej
-
-# 3. Test
-echo "powiedz hej" | claude -p
-# Powinieneś dostać krótką odpowiedź
+# Sprawdź
+which claude          # /root/.local/bin/claude lub /usr/local/bin/claude
+claude --version
 ```
 
-Token OAuth Claude Code zapisuje się w `/root/.claude/credentials.json` — **chroń ten plik, NIE udostępniaj**.
+#### Krok 2.3: Login OAuth (przez SSH, NIE z konsoli)
+Logowanie wymaga otwarcia URL w przeglądarce. Najprościej:
 
-### Sprawdzenie integracji w AnberMon
+```bash
+# Przez SSH na konsoli — uruchom interaktywną sesję Claude
+ssh root@<IP-anbernic>
+claude
+```
 
-Po skonfigurowaniu obu (Discord + Claude Code), uruchom AnbernBota i AnberMona:
+W sesji Claude wpisz:
+```
+/login
+```
+
+- Wybierz tryb logowania: **Claude Max account** (lub Pro / API key)
+- Claude wyświetli długi URL `https://claude.ai/auth/...`
+- **Otwórz ten URL na laptopie/telefonie** w przeglądarce
+- Zaloguj się do swojego konta Anthropic
+- Strona pokaże **kod autoryzacyjny** — skopiuj go
+- **Wklej kod** w terminalu SSH gdzie czeka prompt → Enter
+- Claude zapisze token OAuth w `/root/.claude/credentials.json`
+
+#### Krok 2.4: Test
+```bash
+# Wyjdź z interaktywnej sesji Claude (Ctrl+C × 2)
+echo "powiedz cześć" | claude -p
+# Powinieneś dostać polską odpowiedź — login działa
+```
+
+#### Krok 2.5 (alternatywa): klucz API zamiast OAuth
+Jeśli wolisz nie używać OAuth (np. brak Pro/Max, masz tylko API):
+```bash
+echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> /root/.bashrc
+source /root/.bashrc
+# Test:
+claude --bare -p "test"
+```
+
+> Token Claude Code (OAuth) jest w `/root/.claude/credentials.json` — chroń ten plik, nie udostępniaj. Klucz API jest w `/root/.bashrc` jako env var.
+
+### Część 3 — Test przepływu w AnberMon
+
+Po skonfigurowaniu (Discord token w env + Claude Code zalogowany), gdy uruchomisz swojego bota oraz AnberMon:
 - Sekcja **BOT** w AnberMon pokaże `Bot: online` (zielony)
-- Sekcja **WIADOMOŚCI DISCORD** zacznie pokazywać ostatnie wiadomości z serwera
-- Sekcja **OSTATNIE PLIKI** wypełni się gdy bot zacznie odbierać/zapisywać pliki ze sprawozdań
+- **Status** → `gotowy` lub `przetwarza...` w zależności od stanu
+- **Kolejka** → liczba zadań w buforze
+- **WIADOMOŚCI DISCORD** → ostatnie 12 wiadomości (Twoich i bota)
+- **OSTATNIE PLIKI** → 3 ostatnie pliki które bot zapisał
+
+Wyślij testową wiadomość na swój serwer Discord — w ciągu 2 sekund powinna pojawić się w AnberMon.
 
 ## Logi
 
