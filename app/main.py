@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""AnberMon — monitor systemu i aktywności bota na Anbernic RG40XX V.
-
-GitHub: https://github.com/karolfurtak/AnberMon
-"""
+"""AnbernMon — monitor aktywności bota i systemu na Anbernic RG40XX V."""
 import os, sys, time, json, glob
 from collections import deque
 from pathlib import Path
@@ -75,6 +72,31 @@ def read_activity() -> dict:
         return json.loads(ACTIVITY_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {'queue': 0, 'busy': False, 'messages': [], 'files': []}
+
+def read_ip() -> str:
+    """Adres IPv4 aktywnego interfejsu (preferuj wlan0)."""
+    try:
+        import socket, subprocess
+        # spróbuj wlan0 najpierw
+        for iface in ('wlan0', 'wlan1', 'eth0'):
+            try:
+                r = subprocess.run(['ip', '-4', 'addr', 'show', iface],
+                                   capture_output=True, text=True, timeout=2)
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith('inet '):
+                        return line.split()[1].split('/')[0]
+            except Exception:
+                continue
+        # fallback: connect do publicznego IP (bez ruchu) — zwraca local-side IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        s.connect(('8.8.8.8', 53))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return 'brak'
 
 def bot_online() -> bool:
     try:
@@ -293,7 +315,8 @@ class Monitor:
         uptime_raw = Path('/proc/uptime').read_text().split()[0]
         up_s = int(float(uptime_raw))
         up_str = f'{up_s//3600}h {(up_s%3600)//60}m'
-        self._text(bx, y2, f'Uptime:  {up_str}', self.fsm, DIM)
+        self._text(bx, y2, f'Uptime:  {up_str}', self.fsm, DIM); y2 += 14
+        self._text(bx, y2, f'IP: {read_ip()}', self.fsm, ACC)
 
         # ── Separator ───────────────────────────────────────────────────────
         sep_y = y + 4
