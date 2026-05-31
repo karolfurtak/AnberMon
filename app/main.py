@@ -67,6 +67,17 @@ def read_bat() -> tuple:
     except Exception:
         return None, None
 
+def read_disk(path='/mnt/data'):
+    """Zajętość dysku danych: (procent, MB zajęte, MB pojemność)."""
+    try:
+        import shutil
+        u = shutil.disk_usage(path)
+        used = u.total - u.free
+        pct = used / u.total * 100 if u.total else 0.0
+        return pct, used >> 20, u.total >> 20
+    except Exception:
+        return 0.0, 0, 0
+
 def read_activity() -> dict:
     try:
         return json.loads(ACTIVITY_FILE.read_text(encoding='utf-8'))
@@ -283,6 +294,9 @@ class Monitor:
         temp_col = GRN if temp_c < 60 else (YEL if temp_c < 75 else RED)
         self._text(8, y, f'Temp {temp_c:.1f}°C  {bar(min(temp_c,100), 10)}', self.fsm, temp_col); y += 14
         self._text(8, y, f'RAM  {ram_u}/{ram_t} MB', self.fsm, DIM); y += 14
+
+        disk_p, disk_u, disk_t = read_disk()
+        self._text(8, y, f'Disk {disk_u}/{disk_t} MB  {bar(disk_p, 10)}', self.fsm, pct_color(disk_p)); y += 14
 
         bat_cap, bat_status = read_bat()
         if bat_cap is not None:
