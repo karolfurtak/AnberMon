@@ -78,6 +78,40 @@ def read_disk(path='/mnt/data'):
     except Exception:
         return 0.0, 0, 0
 
+TOKENS_FILE = Path('/mnt/data/anberbot_tokens.json')
+
+def read_tokens():
+    """Zużycie tokenów Claude (kumulacyjne, prune-safe). Zwraca dict lub None.
+    Źródło: anberbot-token-tally.timer -> /mnt/data/anberbot_tokens.json."""
+    try:
+        d = json.loads(TOKENS_FILE.read_text(encoding='utf-8'))
+        return {
+            'io':    int(d.get('in', 0)) + int(d.get('out', 0)),
+            'cache': int(d.get('cc', 0)) + int(d.get('cr', 0)),
+            'n':     int(d.get('sessions_n', 0)),
+        }
+    except Exception:
+        return None
+
+def _htok(n) -> str:
+    """Skrót liczby tokenów: 1234 -> 1.2K, 1_233_490 -> 3.23M.
+    2 miejsca po przecinku w zakresie M, by widać było przyrost (~10k = 0.01M)."""
+    if n >= 1_000_000:
+        return f'{n/1_000_000:.2f}M'
+    if n >= 1_000:
+        return f'{n/1_000:.1f}K'
+    return str(int(n))
+
+def read_boot_time():
+    """Epoch czasu startu systemu (z /proc/stat btime). None gdy brak."""
+    try:
+        for line in Path('/proc/stat').read_text().splitlines():
+            if line.startswith('btime'):
+                return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
 def read_activity() -> dict:
     try:
         return json.loads(ACTIVITY_FILE.read_text(encoding='utf-8'))
@@ -329,8 +363,18 @@ class Monitor:
         uptime_raw = Path('/proc/uptime').read_text().split()[0]
         up_s = int(float(uptime_raw))
         up_str = f'{up_s//3600}h {(up_s%3600)//60}m'
-        self._text(bx, y2, f'Uptime:  {up_str}', self.fsm, DIM); y2 += 14
-        self._text(bx, y2, f'IP: {read_ip()}', self.fsm, ACC)
+        bt = read_boot_time()
+        bt_s = f'  (od {datetime.fromtimestamp(bt):%m-%d %H:%M})' if bt else ''
+        self._text(bx, y2, f'Uptime:  {up_str}{bt_s}', self.fsm, DIM); y2 += 14
+        self._text(bx, y2, f'IP: {read_ip()}', self.fsm, ACC); y2 += 14
+
+        tok = read_tokens()
+        if tok:
+            self._text(bx, y2,
+                       f'Tokeny:  {_htok(tok["io"])} I/O +{_htok(tok["cache"])} cache · {tok["n"]} ses',
+                       self.fsm, GRN)
+        else:
+            self._text(bx, y2, 'Tokeny:  brak danych', self.fsm, YEL)
 
         # ── Separator ───────────────────────────────────────────────────────
         sep_y = y + 4

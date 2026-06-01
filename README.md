@@ -19,7 +19,7 @@ Jeśli zbudowałeś (lub planujesz zbudować) **agenta AI na konsoli Anbernic** 
 **AnberMon** to fullscreen SDL2 panel który pokazuje wszystko to równocześnie — uruchamiasz z App Center konsoli i widzisz **na ekranie konsoli, w czasie rzeczywistym**:
 
 - **Lewa kolumna SYSTEM** — CPU%, RAM%, Swap%, temperatura, MB used, bateria z paskiem progresu i wskaźnikiem ładowania
-- **Prawa kolumna BOT** — status bota Discord (online/offline scan po procesie), kolejka zadań, liczba plików w katalogu sprawozdań, uptime systemu
+- **Prawa kolumna BOT** — status bota Discord (online/offline scan po procesie), kolejka zadań, liczba plików w katalogu sprawozdań, uptime systemu z czasem restartu, licznik zużytych tokenów Claude
 - **Wykres czasowy** — 3 linie (CPU zielona, RAM niebieska, Temp °C czerwona) na wspólnym wykresie 0-100%, 4 minuty historii
 - **Wiadomości Discord** — ostatnie 12 wiadomości z Twoich kanałów (autorzy, kanały, treść)
 - **Ostatnie pliki** — 3 ostatnio zapisane pliki sprawozdań przez agenta
@@ -44,7 +44,8 @@ Opcjonalnie integruje się z [AnbernBot](https://github.com/karolfurtak/AnbernBo
 ## Features
 
 - **Sekcja SYSTEM:** CPU%, RAM% (+ MB used/total), Swap%, Temp °C, bateria (% + status ładowania) — wszystko z paskami progresu i kodowaniem kolorystycznym (zielony/żółty/czerwony wg progów)
-- **Sekcja BOT** *(opcjonalna):* status online/offline (psutil scan procesu `anberbot.py`), kolejka zadań, liczba plików w `/mnt/data/sprawozdania/`, uptime
+- **Sekcja BOT** *(opcjonalna):* status online/offline (psutil scan procesu `anberbot.py`), kolejka zadań, liczba plików w `/mnt/data/sprawozdania/`, uptime z czasem restartu (`/proc/stat btime`)
+- **Licznik tokenów Claude** *(opcjonalny):* kumulacyjne zużycie tokenów (I/O + cache) i liczba sesji, czytane z `/mnt/data/anberbot_tokens.json` (zasila osobny `anberbot-token-tally.timer` sumujący `usage` z transkryptów Claude — prune-safe). Brak pliku → „brak danych"
 - **Wykres czasowy** 640×100px: 3 linie (CPU zielona, RAM niebieska, Temp °C czerwona) na wspólnym układzie współrzędnych 0-100, siatka co 25%, 4 minuty historii (120 próbek × 2s)
 - **Wiadomości Discord** *(z integracją AnbernBot):* ostatnie 12 wiadomości z kanałów / wątków
 - **Ostatnie pliki** *(z integracją AnbernBot):* 3 ostatnio zapisane pliki sprawozdań
