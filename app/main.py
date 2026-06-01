@@ -89,6 +89,7 @@ def read_tokens():
             'io':    int(d.get('in', 0)) + int(d.get('out', 0)),
             'cache': int(d.get('cc', 0)) + int(d.get('cr', 0)),
             'n':     int(d.get('sessions_n', 0)),
+            'since': d.get('since'),
         }
     except Exception:
         return None
@@ -372,12 +373,21 @@ class Monitor:
         if tok:
             self._text(bx, y2,
                        f'Tokeny:  {_htok(tok["io"])} I/O +{_htok(tok["cache"])} cache · {tok["n"]} ses',
-                       self.fsm, GRN)
+                       self.fsm, GRN); y2 += 13
+            since_s = ''
+            if tok.get('since'):
+                try:
+                    since_s = f'{datetime.fromisoformat(tok["since"]):%m-%d %H:%M}'
+                except Exception:
+                    since_s = str(tok['since'])
+            self._text(bx, y2,
+                       f'         licznik od {since_s}' if since_s else '         licznik: —',
+                       self.fsm, DIM); y2 += 13
         else:
-            self._text(bx, y2, 'Tokeny:  brak danych', self.fsm, YEL)
+            self._text(bx, y2, 'Tokeny:  brak danych', self.fsm, YEL); y2 += 14
 
         # ── Separator ───────────────────────────────────────────────────────
-        sep_y = y + 4
+        sep_y = max(y, y2) + 4   # adaptacja do wyższej kolumny (BOT ma 2 linie tokenów)
         self._hline(sep_y)
 
         # ── Wykres CPU / RAM / TEMP ──────────────────────────────────────────
