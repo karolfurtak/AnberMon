@@ -43,7 +43,7 @@ Opcjonalnie integruje się z [AnbernBot](https://github.com/karolfurtak/AnbernBo
 
 ## Features
 
-- **Sekcja SYSTEM:** CPU%, RAM% (+ MB used/total), Swap%, Temp °C, bateria (% + status ładowania) — wszystko z paskami progresu i kodowaniem kolorystycznym (zielony/żółty/czerwony wg progów)
+- **Sekcja SYSTEM:** CPU%, RAM% (+ MB used/total), Swap%, Temp °C, **zajętość CAŁEJ karty SD** (suma wszystkich partycji / fizyczna pojemność karty — MB lub GB), bateria (% + status ładowania) — wszystko z paskami progresu i kodowaniem kolorystycznym (zielony/żółty/czerwony wg progów)
 - **Sekcja BOT** *(opcjonalna):* status online/offline (psutil scan procesu `anberbot.py`), kolejka zadań, liczba plików w `/mnt/data/sprawozdania/`, uptime z czasem restartu (`/proc/stat btime`)
 - **Licznik tokenów Claude** *(opcjonalny):* kumulacyjne zużycie tokenów (I/O + cache) i liczba sesji, czytane z `/mnt/data/anberbot_tokens.json` (zasila osobny `anberbot-token-tally.timer` sumujący `usage` z transkryptów Claude — prune-safe). Brak pliku → „brak danych"
 - **Wykres czasowy** 640×100px: 3 linie (CPU zielona, RAM niebieska, Temp °C czerwona) na wspólnym układzie współrzędnych 0-100, siatka co 25%, 4 minuty historii (120 próbek × 2s)

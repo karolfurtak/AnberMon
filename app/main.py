@@ -68,15 +68,44 @@ def read_bat() -> tuple:
         return None, None
 
 def read_disk(path='/mnt/data'):
-    """Zajętość dysku danych: (procent, MB zajęte, MB pojemność)."""
+    """Zajętość CAŁEJ karty SD: (procent, MB zajęte, MB pojemność całej karty).
+    Pojemność = fizyczny rozmiar mmcblk0; zajęte = suma 'used' wszystkich
+    zamontowanych partycji karty (root, /mnt/data, /mnt/mmc, /mnt/vendor...)."""
     try:
         import shutil
-        u = shutil.disk_usage(path)
-        used = u.total - u.free
-        pct = used / u.total * 100 if u.total else 0.0
-        return pct, used >> 20, u.total >> 20
+        # fizyczna pojemność karty (sektory × 512)
+        total_b = 0
+        for blk in ('mmcblk0', 'mmcblk1'):
+            try:
+                total_b = int(open(f'/sys/block/{blk}/size').read().strip()) * 512
+                card = blk
+                break
+            except Exception:
+                continue
+        if not total_b:
+            raise OSError('brak mmcblk')
+        # suma użycia wszystkich partycji tej karty
+        used_b, seen = 0, set()
+        with open('/proc/mounts') as f:
+            for line in f:
+                parts = line.split()
+                dev, mnt = parts[0], parts[1]
+                if dev.startswith(f'/dev/{card}p') and dev not in seen:
+                    seen.add(dev)
+                    try:
+                        u = shutil.disk_usage(mnt)
+                        used_b += (u.total - u.free)
+                    except Exception:
+                        pass
+        pct = used_b / total_b * 100 if total_b else 0.0
+        return pct, used_b >> 20, total_b >> 20
     except Exception:
-        return 0.0, 0, 0
+        try:
+            import shutil
+            u = shutil.disk_usage(path)
+            return (u.total - u.free) / u.total * 100, (u.total - u.free) >> 20, u.total >> 20
+        except Exception:
+            return 0.0, 0, 0
 
 TOKENS_FILE = Path('/mnt/data/anberbot_tokens.json')
 
@@ -331,7 +360,11 @@ class Monitor:
         self._text(8, y, f'RAM  {ram_u}/{ram_t} MB', self.fsm, DIM); y += 14
 
         disk_p, disk_u, disk_t = read_disk()
-        self._text(8, y, f'Disk {disk_u}/{disk_t} MB  {bar(disk_p, 10)}', self.fsm, pct_color(disk_p)); y += 14
+        if disk_t >= 10240:   # ≥10 GB → pokaż w GB
+            disk_s = f'Karta {disk_u/1024:.1f}/{disk_t/1024:.1f} GB'
+        else:
+            disk_s = f'Karta {disk_u}/{disk_t} MB'
+        self._text(8, y, f'{disk_s}  {bar(disk_p, 10)}', self.fsm, pct_color(disk_p)); y += 14
 
         bat_cap, bat_status = read_bat()
         if bat_cap is not None:
