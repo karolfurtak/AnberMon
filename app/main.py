@@ -35,6 +35,32 @@ EXIT_KEYS = {354, 316}   # MENU (354 = KEY_MENU) lub BTN_MODE (316) — różne 
 POWER_KEY = 116          # KEY_POWER (event0) — toggle ekranu
 FB_BLANK  = '/sys/class/graphics/fb0/blank'  # 0=on, 4=off (działa nawet z SDL)
 
+_BL_BRI = [None]   # zapisana jasnosc miedzy OFF a ON (zeby DISABLE/ENABLE nie zacial regulacji)
+def _bl(on):
+    """Gasi/zapala podswietlenie LED (sunxi disp ioctl). Przy ZAPALANIU przywraca zapisana
+    jasnosc (SET_BRIGHTNESS) — inaczej DISABLE/ENABLE zostawia systemowa regulacje 'zacieta'
+    (MOD-139). fb0/blank gasi tylko obraz."""
+    import os, fcntl, struct
+    try:
+        fd=os.open("/dev/disp", os.O_RDWR)
+        try:
+            if on:
+                fcntl.ioctl(fd, 0x104, struct.pack("@4L",0,0,0,0))             # ENABLE
+                if _BL_BRI[0]:
+                    fcntl.ioctl(fd, 0x102, struct.pack("@4L",0,_BL_BRI[0],0,0))  # restore jasnosc
+                _BL_BRI[0]=None
+            else:
+                if _BL_BRI[0] is None:                                          # zapisz TYLKO przy wejsciu w OFF
+                    try:
+                        b=bytearray(struct.pack("@4L",0,0,0,0))
+                        v=fcntl.ioctl(fd, 0x103, b, True)                       # GET_BRIGHTNESS
+                        _BL_BRI[0]=v if isinstance(v,int) and v>0 else None
+                    except Exception: pass
+                fcntl.ioctl(fd, 0x105, struct.pack("@4L",0,0,0,0))             # DISABLE
+        finally: os.close(fd)
+    except Exception: pass
+
+
 # ── Czytanie zasobów systemowych ────────────────────────────────────────────
 def read_cpu() -> float:
     try:
@@ -60,12 +86,18 @@ def read_temp() -> str:
         return "N/A"
 
 def read_bat() -> tuple:
+    """(capacity %, status, time_to_empty_now [s] lub None). Czas liczy kernel."""
+    base = '/sys/class/power_supply/axp2202-battery/'
     try:
-        cap = int(Path('/sys/class/power_supply/axp2202-battery/capacity').read_text())
-        status = Path('/sys/class/power_supply/axp2202-battery/status').read_text().strip()
-        return cap, status
+        cap = int(Path(base + 'capacity').read_text())
+        status = Path(base + 'status').read_text().strip()
+        try:
+            tte = int(Path(base + 'time_to_empty_now').read_text())
+        except Exception:
+            tte = None
+        return cap, status, tte
     except Exception:
-        return None, None
+        return None, None, None
 
 def read_disk(path='/mnt/data'):
     """Zajętość CAŁEJ karty SD: (procent, MB zajęte, MB pojemność całej karty).
@@ -268,7 +300,7 @@ class Monitor:
         try:
             self._screen_off = not self._screen_off
             val = '4' if self._screen_off else '0'
-            Path(FB_BLANK).write_text(val)
+            Path(FB_BLANK).write_text(val); _bl(not self._screen_off)
             self._dbg.write(f'screen {"OFF" if self._screen_off else "ON"} fb0={val}\n'); self._dbg.flush()
         except Exception as e:
             self._dbg.write(f'screen toggle ERR: {e}\n'); self._dbg.flush()
@@ -366,10 +398,20 @@ class Monitor:
             disk_s = f'Karta {disk_u}/{disk_t} MB'
         self._text(8, y, f'{disk_s}  {bar(disk_p, 10)}', self.fsm, pct_color(disk_p)); y += 14
 
-        bat_cap, bat_status = read_bat()
+        bat_cap, bat_status, bat_tte = read_bat()
         if bat_cap is not None:
             bat_col = GRN if bat_cap > 50 else (YEL if bat_cap > 20 else RED)
-            bat_s   = '(laduje)' if bat_status == 'Charging' else ('(pelna)' if bat_status == 'Full' else '')
+            # ladowarka podlaczona -> (ladowanie); odlaczona -> przewidywany czas do
+            # rozladowania (kernel: time_to_empty_now). MOD-139.
+            if bat_status == 'Charging':
+                bat_s = '(ladowanie)'
+            elif bat_status == 'Full':
+                bat_s = '(pelna)'
+            elif bat_tte and bat_tte > 0:
+                h, m = bat_tte // 3600, (bat_tte % 3600) // 60
+                bat_s = f'(~{h}h {m:02d}m)' if h else f'(~{m}m)'
+            else:
+                bat_s = ''
             self._text(8, y, f'Bat  {bat_cap:3d}%  {bar(bat_cap, 10)} {bat_s}', self.fsm, bat_col)
         y += 14
 
@@ -507,7 +549,7 @@ class Monitor:
 
             # gdy ekran ma być OFF, ponawiaj write co 200ms (kernel ma tendencję do przywracania)
             if self._screen_off and now - last_blank_re >= 200:
-                try: Path(FB_BLANK).write_text('4')
+                try: Path(FB_BLANK).write_text('4'); _bl(False)
                 except Exception: pass
                 last_blank_re = now
 
@@ -555,7 +597,7 @@ class Monitor:
 
     def quit(self):
         # zawsze przywróć ekran ON żeby nie zostawić ciemnego wyświetlacza
-        try: Path(FB_BLANK).write_text('0')
+        try: Path(FB_BLANK).write_text('0'); _bl(True)
         except Exception: pass
         if self._pwr:
             try: self._pwr.ungrab()
