@@ -16,6 +16,10 @@ ACTIVITY_FILE = Path('/mnt/data/anberbot_activity.json')
 WORK_DIR      = Path('/mnt/data/sprawozdania')
 REFRESH_MS    = 2000
 HISTORY_SIZE  = 120   # próbek × 2s = 4 minuty
+IDLE_TIMEOUT_MS = 5 * 60 * 1000   # 5 min bezczynności → autowygaszenie ekranu (MOD-142)
+SAMPLE_LOG      = Path('/mnt/data/anbermon_samples.log')  # akwizycja CPU/RAM/TEMP,
+    # znacznik czasu co próbkę — niezależna od stanu ekranu (dowód ciągłości zapisu)
+SAMPLE_LOG_CAP  = 5_000_000   # bajtów — powyżej ucinamy do ostatnich 2000 linii
 FONT_PATH     = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
 FONT_SM       = 11   # tekst główny
 FONT_MD       = 13   # nagłówki sekcji
@@ -263,6 +267,7 @@ class Monitor:
         self._file_count = 0
         self._file_ts    = 0.0
         self._history: deque = deque(maxlen=HISTORY_SIZE)  # (cpu, ram, temp_c)
+        self._last = None   # ostatnia próbka _sample(): (cpu, ram_p, ram_u, ram_t, swp_p, temp_c)
 
         # evdev dla MENU (event1 = ANBERNIC-keys)
         self._gp = None
@@ -295,6 +300,29 @@ class Monitor:
         except Exception as _ex3:
             self._dbg.write(f'evdev power FAIL: {_ex3}\n'); self._dbg.flush()
             self._pwr = None
+
+    def _sample(self):
+        """Akwizycja CPU/RAM/TEMP — WOŁANA NIEZALEŻNIE od rysowania (patrz run()),
+        żeby autowygaszenie ekranu NIE przerywało zapisu wykresu (MOD-142). Dopisuje
+        też do SAMPLE_LOG (plik z jedną próbką na wiersz + znacznik czasu) — to jest
+        dowód ciągłości akwizycji przy zgaszonym ekranie."""
+        cpu = read_cpu()
+        ram_p, ram_u, ram_t, swp_p = read_mem()
+        try:
+            temp_c = int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000
+        except Exception:
+            temp_c = 0.0
+        self._history.append((cpu, ram_p, temp_c))
+        self._last = (cpu, ram_p, ram_u, ram_t, swp_p, temp_c)
+        try:
+            if SAMPLE_LOG.exists() and SAMPLE_LOG.stat().st_size > SAMPLE_LOG_CAP:
+                tail = SAMPLE_LOG.read_text(encoding='utf-8').splitlines()[-2000:]
+                SAMPLE_LOG.write_text('\n'.join(tail) + '\n', encoding='utf-8')
+            with open(SAMPLE_LOG, 'a', encoding='utf-8') as f:
+                f.write(f'{datetime.now().isoformat(timespec="seconds")},{cpu:.1f},{ram_p:.1f},{temp_c:.1f}\n')
+        except Exception as e:
+            self._dbg.write(f'SAMPLE_LOG write ERR: {e}\n'); self._dbg.flush()
+        return self._last
 
     def _toggle_screen(self):
         try:
@@ -363,14 +391,10 @@ class Monitor:
         d.rectangle([(0,0),(W,H)], fill=BG)
 
         now   = datetime.now().strftime('%Y-%m-%d  %H:%M:%S')
-        cpu   = read_cpu()
-        ram_p, ram_u, ram_t, swp_p = read_mem()
         act   = read_activity()
-        try:
-            temp_c = int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000
-        except Exception:
-            temp_c = 0.0
-        self._history.append((cpu, ram_p, temp_c))
+        # próbka bierzemy z _sample() (wołane niezależnie w run(), patrz MOD-142) —
+        # tu tylko czytamy ostatnią, żeby nie dublować odczytów CPU/RAM/TEMP
+        cpu, ram_p, ram_u, ram_t, swp_p, temp_c = self._last or self._sample()
 
         # ── Nagłówek ────────────────────────────────────────────────────────
         self._text(8, 4, '⬡ ANBERNIC MONITOR', self.fmd, ACC)
@@ -517,7 +541,7 @@ class Monitor:
             y += 13
 
         # ── Stopka ───────────────────────────────────────────────────────────
-        self._text(8, H-14, 'MENU = wyjście  |  POWER = ekran off/on', self.fsm, DIM)
+        self._text(8, H-14, 'MENU = wyjście  |  POWER = ekran off/on  |  auto-off po 5 min', self.fsm, DIM)
 
         # ── SDL blit ─────────────────────────────────────────────────────────
         raw = self.img.tobytes()
@@ -543,9 +567,17 @@ class Monitor:
         start_ms = sdl2.SDL_GetTicks()
         GUARD_MS = 5000  # pierwsze 5s — ignoruj quit/esc
 
-        last_blank_re = 0
+        last_blank_re  = 0
+        last_sample    = 0
+        last_input_ms  = start_ms   # reset licznika bezczynności → autowygaszenie (MOD-142)
         while True:
             now = sdl2.SDL_GetTicks()
+
+            # akwizycja CPU/RAM/TEMP — NIEZALEŻNA od stanu ekranu, żeby wygaszenie
+            # (auto lub ręczne) nie przerywało zapisu wykresu/logu (MOD-142)
+            if now - last_sample >= REFRESH_MS:
+                self._sample()
+                last_sample = now
 
             # gdy ekran ma być OFF, ponawiaj write co 200ms (kernel ma tendencję do przywracania)
             if self._screen_off and now - last_blank_re >= 200:
@@ -553,12 +585,18 @@ class Monitor:
                 except Exception: pass
                 last_blank_re = now
 
-            # render tylko gdy ekran włączony
+            # render (rysowanie) tylko gdy ekran włączony — akwizycja wyżej biegnie zawsze
             if not self._screen_off and now - last >= REFRESH_MS:
                 self.render()
                 last = now
 
             guard = (now - start_ms) < GUARD_MS
+
+            # autowygaszenie po IDLE_TIMEOUT_MS bezczynności (MOD-142) — TYLKO gaśnie
+            # samoczynnie; obudzenie zawsze przez klawisz (patrz niżej), nigdy odwrotnie
+            if not guard and not self._screen_off and now - last_input_ms >= IDLE_TIMEOUT_MS:
+                self._dbg.write(f'IDLE {IDLE_TIMEOUT_MS/1000:.0f}s -> auto-off\n'); self._dbg.flush()
+                self._toggle_screen()
 
             # evdev — loguj wszystkie key-events, wyjdź na MENU_KEY
             if self._gp:
@@ -567,6 +605,13 @@ class Monitor:
                     for e in self._gp.read():
                         if e.type == 1:  # EV_KEY
                             self._dbg.write(f'evdev key code={e.code} val={e.value} guard={guard}\n'); self._dbg.flush()
+                            if e.value == 1:
+                                last_input_ms = now
+                                if self._screen_off:
+                                    # pierwszy klawisz po autowygaszeniu TYLKO budzi ekran —
+                                    # nie wykonuje swojej zwykłej funkcji (np. MENU nie wychodzi)
+                                    self._toggle_screen()
+                                    continue
                             if not guard and e.value == 1 and e.code in EXIT_KEYS:
                                 self._dbg.write(f'EXIT key code={e.code}\n'); self._dbg.flush()
                                 self.quit(); return
@@ -576,8 +621,10 @@ class Monitor:
                 import select
                 if select.select([self._pwr.fd], [], [], 0)[0]:
                     for e in self._pwr.read():
-                        if e.type == 1 and e.code == POWER_KEY and e.value == 1 and not guard:
-                            self._toggle_screen()
+                        if e.type == 1 and e.code == POWER_KEY and e.value == 1:
+                            last_input_ms = now
+                            if not guard:
+                                self._toggle_screen()
 
             # SDL events — wyjdź TYLKO przez ESC (BT klawiatura).
             # SDL_QUIT i inne KEYDOWN ignorowane — żeby przeżyć uśpienie/wybudzenie.
@@ -588,6 +635,10 @@ class Monitor:
                     self._dbg.write('SDL_QUIT (ignoruję — pewnie sleep)\n'); self._dbg.flush()
                     continue
                 if ev.type == sdl2.SDL_KEYDOWN:
+                    last_input_ms = now
+                    if self._screen_off:
+                        self._toggle_screen()   # pierwszy klawisz po autowygaszeniu = tylko budzenie
+                        continue
                     self._dbg.write(f'KEYDOWN sym={ev.key.keysym.sym}\n'); self._dbg.flush()
                     if ev.key.keysym.sym == sdl2.SDLK_ESCAPE:
                         self._dbg.write('EXIT ESC\n'); self._dbg.flush()
